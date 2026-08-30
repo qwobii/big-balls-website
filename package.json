@@ -1,0 +1,20 @@
+{
+  "name": "big-balls-website",
+  "version": "1.0.0",
+  "description": "Big Balls Bowling website with an admin budget tracker backed by SQLite.",
+  "main": "server.js",
+  "engines": {
+    "node": ">=22.5.0"
+  },
+  "scripts": {
+    "start": "node --experimental-sqlite server.js"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "express": "^5.2.1",
+    "multer": "^2.3.0",
+    "papaparse": "^5.7.0"
+  }
+}
