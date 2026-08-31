@@ -1,0 +1,256 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Big Balls — Budget Tracker</title>
+<link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+
+<div class="topbar">
+  <a class="brand" href="/"><span class="pin">🎳</span>BIG BALLS</a>
+  <div class="tabs">
+    <a class="tab-btn" href="/">Home</a>
+    <a class="tab-btn active" href="/admin.html">Admin</a>
+  </div>
+</div>
+
+<div class="admin-wrap">
+  <div class="admin-head">
+    <h1>Budget Tracker</h1>
+    <p>Upload your transaction CSV whenever you've got one — daily, weekly, monthly. Already-saved transactions are automatically skipped, so only new ones get added to the running total.</p>
+  </div>
+
+  <div class="crt">
+    <div class="crt-inner">
+
+      <div class="memory-bar" id="memoryBar">
+        <div class="info">Loading saved data…</div>
+        <button class="link-btn danger" id="clearAllBtn" style="display:none;">Clear all saved data</button>
+      </div>
+
+      <div class="dropzone" id="dropzone">
+        <h3>Drop a transaction CSV here</h3>
+        <p>or click to browse — .csv files only</p>
+        <input type="file" id="fileInput" accept=".csv">
+      </div>
+
+      <div class="admin-tools">
+        <button class="link-btn" id="sampleBtn">Download a sample CSV format</button>
+      </div>
+
+      <div id="uploadNote"></div>
+      <div id="errorBox"></div>
+
+      <div id="reportArea">
+        <div class="stat-row">
+          <div class="stat income"><div class="label">Total Income</div><div class="value" id="statIncome">$0</div></div>
+          <div class="stat expense"><div class="label">Total Expenses</div><div class="value" id="statExpense">$0</div></div>
+          <div class="stat net"><div class="label">Net Profit / Loss</div><div class="value" id="statNet">$0</div></div>
+          <div class="stat margin"><div class="label">Profit Margin</div><div class="value" id="statMargin">0%</div></div>
+        </div>
+
+        <div class="split-bar" id="splitBar">
+          <div class="seg inc" id="splitInc">Income</div>
+          <div class="seg exp" id="splitExp">Expenses</div>
+        </div>
+
+        <div class="panels">
+          <div class="panel">
+            <h3><span class="dot inc"></span>Income by type</h3>
+            <div id="incomeCats"></div>
+          </div>
+          <div class="panel">
+            <h3><span class="dot exp"></span>Expenses by type</h3>
+            <div id="expenseCats"></div>
+          </div>
+        </div>
+
+        <div class="panel">
+          <h3 style="margin-bottom:14px;">All transactions (<span id="txCount">0</span>)</h3>
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th>Date</th><th>Description</th><th>Type</th><th>Category</th><th style="text-align:right;">Amount</th></tr></thead>
+              <tbody id="txBody"></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
+    </div>
+  </div>
+</div>
+
+<script>
+function fmtMoney(n){
+  const sign = n<0 ? '-' : '';
+  return sign+'$'+Math.abs(n).toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2});
+}
+function escapeHtml(str){
+  return String(str).replace(/[&<>"']/g, m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));
+}
+
+const dropzone = document.getElementById('dropzone');
+const fileInput = document.getElementById('fileInput');
+const errorBox = document.getElementById('errorBox');
+const uploadNote = document.getElementById('uploadNote');
+const reportArea = document.getElementById('reportArea');
+const sampleBtn = document.getElementById('sampleBtn');
+const memoryBar = document.getElementById('memoryBar');
+const clearAllBtn = document.getElementById('clearAllBtn');
+
+dropzone.addEventListener('click', ()=>fileInput.click());
+dropzone.addEventListener('dragover', e=>{e.preventDefault(); dropzone.classList.add('drag');});
+dropzone.addEventListener('dragleave', ()=>dropzone.classList.remove('drag'));
+dropzone.addEventListener('drop', e=>{
+  e.preventDefault(); dropzone.classList.remove('drag');
+  if(e.dataTransfer.files.length) handleFile(e.dataTransfer.files[0]);
+});
+fileInput.addEventListener('change', e=>{ if(e.target.files.length) handleFile(e.target.files[0]); fileInput.value=''; });
+
+sampleBtn.addEventListener('click', ()=>{
+  const sample = "iban,action,doneBy,fromAccount,toAccount,amount,description,doneAt\n"+
+    "916174,transferin,System,2,916174,2000,Tokens Purchased,2026-08-01T00:08:06Z\n"+
+    "916174,transferout,System,916174,2,300,Payroll: Jake Parker,2026-08-01T18:01:26Z\n"+
+    "916174,transferin,System,2,916174,4250,POS Transaction,2026-08-01T20:15:05Z\n"+
+    "916174,transferout,System,916174,912473,20000,Coffee Beans and Water Bottles,2026-08-02T01:14:54Z\n";
+  const blob = new Blob([sample], {type:'text/csv'});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href=url; a.download='big-balls-sample-transactions.csv'; a.click();
+  URL.revokeObjectURL(url);
+});
+
+clearAllBtn.addEventListener('click', async ()=>{
+  if(!confirm('This will permanently erase all saved transactions on the server. Continue?')) return;
+  await fetch('/api/clear', {method:'POST'});
+  reportArea.style.display='none';
+  uploadNote.style.display='none';
+  refreshMemoryBar(0);
+});
+
+function showError(msg){ errorBox.textContent = msg; errorBox.style.display='block'; }
+function showNote(msg, cls){ uploadNote.textContent = msg; uploadNote.className = cls; uploadNote.style.display='block'; }
+
+async function handleFile(file){
+  errorBox.style.display='none';
+  uploadNote.style.display='none';
+  if(!file.name.toLowerCase().endsWith('.csv')){
+    showError('That file doesn\'t look like a CSV. Export your transactions as .csv and try again.');
+    return;
+  }
+  const formData = new FormData();
+  formData.append('file', file);
+
+  try{
+    const res = await fetch('/api/upload', { method:'POST', body: formData });
+    const data = await res.json();
+    if(!res.ok){ showError(data.error || 'Something went wrong uploading that file.'); return; }
+
+    let msg;
+    if(data.added===0 && data.skipped>0){
+      msg = `No new transactions — all ${data.skipped} rows in this file were already saved.`;
+      showNote(msg, 'warn');
+    } else if(data.skipped>0){
+      msg = `Added ${data.added} new transaction${data.added===1?'':'s'}, skipped ${data.skipped} already-saved duplicate${data.skipped===1?'':'s'}.`;
+      showNote(msg, 'ok');
+    } else {
+      msg = `Added ${data.added} new transaction${data.added===1?'':'s'}.`;
+      showNote(msg, 'ok');
+    }
+    if(data.unreadable>0){
+      showNote(uploadNote.textContent+` (${data.unreadable} row${data.unreadable===1?'':'s'} had an unreadable amount and were skipped.)`, 'warn');
+    }
+
+    refreshMemoryBar(data.totalSaved);
+    await loadReport();
+  }catch(err){
+    showError('Could not reach the server: '+err.message);
+  }
+}
+
+function refreshMemoryBar(count){
+  const info = memoryBar.querySelector('.info');
+  if(count > 0){
+    info.innerHTML = `<b>${count}</b> transactions saved so far. Upload a new export any time — duplicates are skipped automatically.`;
+    clearAllBtn.style.display='inline-block';
+  } else {
+    info.textContent = 'No saved data yet — upload a CSV to get started.';
+    clearAllBtn.style.display='none';
+  }
+}
+
+async function loadReport(){
+  const res = await fetch('/api/report');
+  const data = await res.json();
+  if(!data.count){ reportArea.style.display='none'; return; }
+
+  let totalIncome=0, totalExpense=0;
+  const incomeCats={}, expenseCats={};
+  data.transactions.forEach(t=>{
+    if(t.isIncome){ totalIncome += t.amount; incomeCats[t.category]=(incomeCats[t.category]||0)+t.amount; }
+    else { totalExpense += t.amount; expenseCats[t.category]=(expenseCats[t.category]||0)+t.amount; }
+  });
+
+  const net = totalIncome - totalExpense;
+  const margin = totalIncome>0 ? (net/totalIncome*100) : 0;
+
+  document.getElementById('statIncome').textContent = fmtMoney(totalIncome);
+  document.getElementById('statExpense').textContent = fmtMoney(totalExpense);
+  const netEl = document.getElementById('statNet');
+  netEl.textContent = fmtMoney(net);
+  netEl.className = 'value ' + (net>=0 ? 'good':'bad');
+  document.getElementById('statMargin').textContent = margin.toFixed(1)+'%';
+
+  const total = totalIncome+totalExpense || 1;
+  const incPct = totalIncome/total*100;
+  const expPct = totalExpense/total*100;
+  document.getElementById('splitInc').style.width = incPct+'%';
+  document.getElementById('splitExp').style.width = expPct+'%';
+  document.getElementById('splitInc').textContent = incPct>12 ? 'Income '+incPct.toFixed(0)+'%' : '';
+  document.getElementById('splitExp').textContent = expPct>12 ? 'Expenses '+expPct.toFixed(0)+'%' : '';
+
+  renderCatList('incomeCats', incomeCats, totalIncome, 'inc');
+  renderCatList('expenseCats', expenseCats, totalExpense, 'exp');
+
+  document.getElementById('txCount').textContent = data.count;
+  document.getElementById('txBody').innerHTML = data.transactions.map(t=>`
+    <tr>
+      <td>${escapeHtml(t.date)}</td>
+      <td>${escapeHtml(t.description)}</td>
+      <td><span class="tag ${t.isIncome?'inc':'exp'}">${t.isIncome?'Income':'Expense'}</span></td>
+      <td>${escapeHtml(t.category)}</td>
+      <td style="text-align:right;" class="${t.isIncome?'amt-pos':'amt-neg'}">${t.isIncome?'+':'-'}${fmtMoney(t.amount)}</td>
+    </tr>`).join('');
+
+  reportArea.style.display='block';
+}
+
+function renderCatList(containerId, cats, total, kind){
+  const container = document.getElementById(containerId);
+  const entries = Object.entries(cats).sort((a,b)=>b[1]-a[1]);
+  if(!entries.length){
+    container.innerHTML = '<p style="color:var(--chrome); font-size:13px;">No transactions in this bucket yet.</p>';
+    return;
+  }
+  container.innerHTML = entries.map(([name, amt])=>{
+    const pct = total>0 ? (amt/total*100) : 0;
+    return `
+      <div class="cat-row">
+        <div class="top"><span>${escapeHtml(name)}</span><span class="amt">${fmtMoney(amt)} · ${pct.toFixed(1)}%</span></div>
+        <div class="cat-track"><div class="cat-fill ${kind}" style="width:${pct}%;"></div></div>
+      </div>`;
+  }).join('');
+}
+
+(async function init(){
+  const res = await fetch('/api/report');
+  const data = await res.json();
+  refreshMemoryBar(data.count);
+  if(data.count) await loadReport();
+})();
+</script>
+
+</body>
+</html>
