@@ -19,7 +19,7 @@
 <div class="admin-wrap">
   <div class="admin-head">
     <h1>Budget Tracker</h1>
-    <p>Upload your transaction CSV whenever you've got one — daily, weekly, monthly. Already-saved transactions are automatically skipped, so only new ones get added to the running total.</p>
+    <p>Upload your transaction CSV whenever you've got one. Already-saved transactions are skipped automatically, and anything the categorizer doesn't recognize you can assign yourself.</p>
   </div>
 
   <div class="crt">
@@ -38,10 +38,33 @@
 
       <div class="admin-tools">
         <button class="link-btn" id="sampleBtn">Download a sample CSV format</button>
+        <button class="link-btn" id="toggleCatsBtn">Manage categories</button>
       </div>
 
       <div id="uploadNote"></div>
       <div id="errorBox"></div>
+
+      <!-- ---------- Category manager ---------- -->
+      <div id="categoryManager" style="display:none; margin-top:28px;">
+        <div class="panels">
+          <div class="panel">
+            <h3><span class="dot inc"></span>Income categories</h3>
+            <div id="incomeCatManager"></div>
+            <div class="add-cat-row">
+              <input type="text" id="newIncomeCatName" placeholder="New income category…">
+              <button class="btn small" id="addIncomeCatBtn">Add</button>
+            </div>
+          </div>
+          <div class="panel">
+            <h3><span class="dot exp"></span>Expense categories</h3>
+            <div id="expenseCatManager"></div>
+            <div class="add-cat-row">
+              <input type="text" id="newExpenseCatName" placeholder="New expense category…">
+              <button class="btn small" id="addExpenseCatBtn">Add</button>
+            </div>
+          </div>
+        </div>
+      </div>
 
       <div id="reportArea">
         <div class="stat-row">
@@ -58,11 +81,11 @@
 
         <div class="panels">
           <div class="panel">
-            <h3><span class="dot inc"></span>Income by type</h3>
+            <h3><span class="dot inc"></span>Income by category</h3>
             <div id="incomeCats"></div>
           </div>
           <div class="panel">
-            <h3><span class="dot exp"></span>Expenses by type</h3>
+            <h3><span class="dot exp"></span>Expenses by category</h3>
             <div id="expenseCats"></div>
           </div>
         </div>
@@ -90,6 +113,7 @@ function fmtMoney(n){
 function escapeHtml(str){
   return String(str).replace(/[&<>"']/g, m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));
 }
+function escapeAttr(str){ return escapeHtml(str).replace(/"/g,'&quot;'); }
 
 const dropzone = document.getElementById('dropzone');
 const fileInput = document.getElementById('fileInput');
@@ -99,6 +123,10 @@ const reportArea = document.getElementById('reportArea');
 const sampleBtn = document.getElementById('sampleBtn');
 const memoryBar = document.getElementById('memoryBar');
 const clearAllBtn = document.getElementById('clearAllBtn');
+const toggleCatsBtn = document.getElementById('toggleCatsBtn');
+const categoryManager = document.getElementById('categoryManager');
+
+let categoriesCache = [];
 
 dropzone.addEventListener('click', ()=>fileInput.click());
 dropzone.addEventListener('dragover', e=>{e.preventDefault(); dropzone.classList.add('drag');});
@@ -109,12 +137,20 @@ dropzone.addEventListener('drop', e=>{
 });
 fileInput.addEventListener('change', e=>{ if(e.target.files.length) handleFile(e.target.files[0]); fileInput.value=''; });
 
+toggleCatsBtn.addEventListener('click', async ()=>{
+  const showing = categoryManager.style.display !== 'none';
+  categoryManager.style.display = showing ? 'none' : 'block';
+  toggleCatsBtn.textContent = showing ? 'Manage categories' : 'Hide categories';
+  if(!showing) await loadCategories();
+});
+
 sampleBtn.addEventListener('click', ()=>{
   const sample = "iban,action,doneBy,fromAccount,toAccount,amount,description,doneAt\n"+
     "916174,transferin,System,2,916174,2000,Tokens Purchased,2026-08-01T00:08:06Z\n"+
     "916174,transferout,System,916174,2,300,Payroll: Jake Parker,2026-08-01T18:01:26Z\n"+
     "916174,transferin,System,2,916174,4250,POS Transaction,2026-08-01T20:15:05Z\n"+
-    "916174,transferout,System,916174,912473,20000,Coffee Beans and Water Bottles,2026-08-02T01:14:54Z\n";
+    "916174,transferout,System,916174,912473,20000,INGREDIENTS,2026-08-02T01:14:54Z\n"+
+    "916174,transferin,System,884211,916174,50000,Investment from Maze Bank Holdings,2026-08-03T10:00:00Z\n";
   const blob = new Blob([sample], {type:'text/csv'});
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
@@ -159,9 +195,10 @@ async function handleFile(file){
       msg = `Added ${data.added} new transaction${data.added===1?'':'s'}.`;
       showNote(msg, 'ok');
     }
-    if(data.unreadable>0){
-      showNote(uploadNote.textContent+` (${data.unreadable} row${data.unreadable===1?'':'s'} had an unreadable amount and were skipped.)`, 'warn');
-    }
+    const extras = [];
+    if(data.unreadable>0) extras.push(`${data.unreadable} row${data.unreadable===1?'':'s'} had an unreadable amount`);
+    if(data.uncategorized>0) extras.push(`${data.uncategorized} new transaction${data.uncategorized===1?'':'s'} need a category — assign them in the table below`);
+    if(extras.length) showNote(uploadNote.textContent+' ('+extras.join('; ')+'.)', 'warn');
 
     refreshMemoryBar(data.totalSaved);
     await loadReport();
@@ -181,9 +218,79 @@ function refreshMemoryBar(count){
   }
 }
 
+/* ---------- category manager ---------- */
+async function loadCategories(){
+  const res = await fetch('/api/categories');
+  categoriesCache = await res.json();
+  renderCategoryManager();
+}
+
+function renderCategoryManager(){
+  renderCatManagerColumn('incomeCatManager', categoriesCache.filter(c=>c.type==='income'));
+  renderCatManagerColumn('expenseCatManager', categoriesCache.filter(c=>c.type==='expense'));
+}
+
+function renderCatManagerColumn(containerId, cats){
+  const container = document.getElementById(containerId);
+  if(!cats.length){ container.innerHTML = '<p style="color:var(--chrome); font-size:13px;">No categories yet.</p>'; return; }
+  container.innerHTML = cats.map(c => `
+    <div class="cat-manage-row" data-id="${c.id}">
+      <div class="cat-manage-head">
+        <span>${escapeHtml(c.name)}</span>
+        <button class="link-btn danger del-cat-btn" data-id="${c.id}">Delete</button>
+      </div>
+      <div class="chip-row" data-id="${c.id}">
+        ${c.keywords.map(k => `<span class="chip">${escapeHtml(k)}<button class="chip-x" data-keyword="${escapeAttr(k)}">&times;</button></span>`).join('')}
+        <input type="text" class="chip-input" data-id="${c.id}" placeholder="+ keyword">
+      </div>
+    </div>`).join('');
+
+  container.querySelectorAll('.del-cat-btn').forEach(btn=>{
+    btn.addEventListener('click', async ()=>{
+      if(!confirm('Delete this category? Transactions using it will become Uncategorized.')) return;
+      await fetch('/api/categories/'+btn.dataset.id, {method:'DELETE'});
+      await loadCategories();
+      if(reportArea.style.display!=='none') await loadReport();
+    });
+  });
+  container.querySelectorAll('.chip-x').forEach(btn=>{
+    btn.addEventListener('click', async ()=>{
+      await fetch('/api/rules/'+encodeURIComponent(btn.dataset.keyword), {method:'DELETE'});
+      await loadCategories();
+    });
+  });
+  container.querySelectorAll('.chip-input').forEach(input=>{
+    input.addEventListener('keydown', async e=>{
+      if(e.key==='Enter' && input.value.trim()){
+        await fetch(`/api/categories/${input.dataset.id}/keywords`, {
+          method:'POST', headers:{'Content-Type':'application/json'},
+          body: JSON.stringify({ keyword: input.value.trim() })
+        });
+        await loadCategories();
+      }
+    });
+  });
+}
+
+document.getElementById('addIncomeCatBtn').addEventListener('click', ()=>addCategory('newIncomeCatName','income'));
+document.getElementById('addExpenseCatBtn').addEventListener('click', ()=>addCategory('newExpenseCatName','expense'));
+
+async function addCategory(inputId, type){
+  const input = document.getElementById(inputId);
+  const name = input.value.trim();
+  if(!name) return;
+  const res = await fetch('/api/categories', {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({ name, type })
+  });
+  if(res.ok){ input.value=''; await loadCategories(); }
+  else { const d = await res.json(); alert(d.error || 'Could not add category.'); }
+}
+
+/* ---------- report ---------- */
 async function loadReport(){
-  const res = await fetch('/api/report');
-  const data = await res.json();
+  const [reportRes] = await Promise.all([fetch('/api/report'), loadCategories()]);
+  const data = await reportRes.json();
   if(!data.count){ reportArea.style.display='none'; return; }
 
   let totalIncome=0, totalExpense=0;
@@ -215,14 +322,38 @@ async function loadReport(){
   renderCatList('expenseCats', expenseCats, totalExpense, 'exp');
 
   document.getElementById('txCount').textContent = data.count;
-  document.getElementById('txBody').innerHTML = data.transactions.map(t=>`
+  document.getElementById('txBody').innerHTML = data.transactions.map(t=>{
+    const opts = categoriesCache.filter(c => c.type === (t.isIncome?'income':'expense'));
+    const selectHtml = `
+      <select class="cat-select" data-id="${t.id}" data-desc="${escapeAttr(t.description)}">
+        <option value="">Uncategorized</option>
+        ${opts.map(c=>`<option value="${c.id}" ${c.id===t.categoryId?'selected':''}>${escapeHtml(c.name)}</option>`).join('')}
+      </select>`;
+    return `
     <tr>
       <td>${escapeHtml(t.date)}</td>
       <td>${escapeHtml(t.description)}</td>
       <td><span class="tag ${t.isIncome?'inc':'exp'}">${t.isIncome?'Income':'Expense'}</span></td>
-      <td>${escapeHtml(t.category)}</td>
+      <td>${selectHtml}</td>
       <td style="text-align:right;" class="${t.isIncome?'amt-pos':'amt-neg'}">${t.isIncome?'+':'-'}${fmtMoney(t.amount)}</td>
-    </tr>`).join('');
+    </tr>`;
+  }).join('');
+
+  document.querySelectorAll('.cat-select').forEach(sel=>{
+    sel.addEventListener('change', async ()=>{
+      const categoryId = sel.value ? Number(sel.value) : null;
+      let saveRule = false;
+      if(categoryId){
+        const catName = sel.options[sel.selectedIndex].text;
+        saveRule = confirm(`Also auto-categorize future transactions described "${sel.dataset.desc}" as ${catName}?`);
+      }
+      await fetch(`/api/transactions/${sel.dataset.id}`, {
+        method:'PATCH', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({ categoryId, saveRule })
+      });
+      await loadReport();
+    });
+  });
 
   reportArea.style.display='block';
 }
@@ -245,6 +376,7 @@ function renderCatList(containerId, cats, total, kind){
 }
 
 (async function init(){
+  await loadCategories();
   const res = await fetch('/api/report');
   const data = await res.json();
   refreshMemoryBar(data.count);
