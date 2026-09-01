@@ -7,33 +7,8 @@ const db = require('./db');
 const app = express();
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 25 * 1024 * 1024 } });
 
-app.use(express.static(path.join(__dirname, 'public')));
+app.use(express.static(__dirname));
 app.use(express.json());
-
-const INCOME_CATS = [
-  { name: 'Lane Rentals', keys: ['lane', 'bowling fee', 'game fee', 'frame'] },
-  { name: 'Bar & Concessions', keys: ['bar', 'drink', 'beer', 'concession', 'food', 'snack', 'kitchen', 'pos transaction', 'pos '] },
-  { name: 'Arcade / Tokens', keys: ['arcade', 'token', 'claw', 'ddr', 'skee'] },
-  { name: 'Pro Shop / Merch', keys: ['merch', 'shirt', 'pro shop', 'apparel', 'shoe rental', 'shoes'] },
-  { name: 'Parties & Events', keys: ['party', 'event', 'birthday', 'league fee', 'tournament'] },
-];
-const EXPENSE_CATS = [
-  { name: 'Payroll', keys: ['payroll', 'wage', 'salary', 'staff', 'paycheck'] },
-  { name: 'Rent', keys: ['rent', 'lease'] },
-  { name: 'Utilities', keys: ['utility', 'electric', 'water bill', 'gas bill', 'internet'] },
-  { name: 'Maintenance', keys: ['maintenance', 'repair', 'lane oil', 'pinsetter', 'pin setter'] },
-  { name: 'Supplies & Inventory', keys: ['supply', 'supplies', 'inventory', 'stock', 'restock'] },
-  { name: 'Marketing', keys: ['marketing', 'ad ', 'advert', 'promo'] },
-  { name: 'Insurance', keys: ['insurance'] },
-];
-
-function findCategory(desc, list) {
-  const d = (desc || '').toLowerCase();
-  for (const c of list) {
-    if (c.keys.some(k => d.includes(k))) return c.name;
-  }
-  return null;
-}
 
 function findHeader(headers, candidates) {
   return headers.find(h => candidates.some(c => h.toLowerCase().trim().includes(c)));
@@ -45,6 +20,56 @@ function parseAmount(raw) {
   return parseFloat(cleaned);
 }
 
+/* ---------- categories ---------- */
+app.get('/api/categories', (req, res) => {
+  res.json(db.getCategories());
+});
+
+app.post('/api/categories', (req, res) => {
+  const { name, type } = req.body;
+  if (!name || !name.trim()) return res.status(400).json({ error: 'Category name is required.' });
+  if (type !== 'income' && type !== 'expense') return res.status(400).json({ error: 'Type must be income or expense.' });
+  try {
+    const id = db.createCategory(name, type);
+    res.json({ id, name: name.trim(), type, keywords: [] });
+  } catch (e) {
+    res.status(400).json({ error: 'That category already exists.' });
+  }
+});
+
+app.delete('/api/categories/:id', (req, res) => {
+  db.deleteCategory(Number(req.params.id));
+  res.json({ ok: true });
+});
+
+app.post('/api/categories/:id/keywords', (req, res) => {
+  const { keyword } = req.body;
+  if (!keyword || !keyword.trim()) return res.status(400).json({ error: 'Keyword is required.' });
+  db.addKeyword(Number(req.params.id), keyword);
+  res.json({ ok: true });
+});
+
+app.delete('/api/rules/:keyword', (req, res) => {
+  db.removeKeyword(decodeURIComponent(req.params.keyword));
+  res.json({ ok: true });
+});
+
+/* ---------- transactions ---------- */
+app.patch('/api/transactions/:id', (req, res) => {
+  const id = Number(req.params.id);
+  const { categoryId, saveRule } = req.body;
+  db.updateTransactionCategory(id, categoryId ?? null);
+
+  if (saveRule && categoryId) {
+    const tx = db.getTransactionById(id);
+    if (tx && tx.description && tx.description !== '—') {
+      db.addKeyword(categoryId, tx.description);
+    }
+  }
+  res.json({ ok: true });
+});
+
+/* ---------- upload ---------- */
 app.post('/api/upload', upload.single('file'), (req, res) => {
   if (!req.file) return res.status(400).json({ error: 'No file was uploaded.' });
 
@@ -71,7 +96,7 @@ app.post('/api/upload', upload.single('file'), (req, res) => {
     return res.status(400).json({ error: 'No column found for transaction amount. Include a column like "Amount".' });
   }
 
-  let added = 0, skipped = 0, unreadable = 0;
+  let added = 0, skipped = 0, unreadable = 0, uncategorized = 0;
 
   for (const row of rows) {
     const rawAmount = row[amountHeader];
@@ -98,19 +123,23 @@ app.post('/api/upload', upload.single('file'), (req, res) => {
     }
 
     const magnitude = Math.abs(amount);
-    let category = categoryHeader ? (row[categoryHeader] || '').trim() : '';
-    if (!category) {
-      category = findCategory(desc, isIncome ? INCOME_CATS : EXPENSE_CATS)
-        || (desc && desc.trim() ? desc.trim().slice(0, 40) : 'Uncategorized');
+
+    let categoryId = null;
+    const explicitCategory = categoryHeader ? (row[categoryHeader] || '').trim() : '';
+    if (explicitCategory) {
+      categoryId = db.findOrCreateCategory(explicitCategory, isIncome ? 'income' : 'expense');
+    } else {
+      categoryId = db.matchCategoryId(desc);
     }
+    if (!categoryId) uncategorized++;
 
     const wasNew = db.insertTransaction({
-      fingerprint, date: dateVal || '—', description: desc || '—', isIncome, category, amount: magnitude
+      fingerprint, date: dateVal || '—', description: desc || '—', isIncome, categoryId, amount: magnitude
     });
     if (wasNew) added++; else skipped++;
   }
 
-  res.json({ added, skipped, unreadable, totalSaved: db.getCount() });
+  res.json({ added, skipped, unreadable, uncategorized, totalSaved: db.getCount() });
 });
 
 app.get('/api/report', (req, res) => {
@@ -118,8 +147,8 @@ app.get('/api/report', (req, res) => {
   res.json({
     count: rows.length,
     transactions: rows.map(r => ({
-      date: r.date, description: r.description, isIncome: !!r.is_income,
-      category: r.category, amount: r.amount
+      id: r.id, date: r.date, description: r.description, isIncome: !!r.is_income,
+      categoryId: r.category_id, category: r.category_name || 'Uncategorized', amount: r.amount
     }))
   });
 });
